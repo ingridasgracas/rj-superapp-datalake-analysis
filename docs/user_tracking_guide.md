@@ -66,19 +66,12 @@ ORDER BY dia_semana;
 | **Retenção** | Usuários ativos por período | Seção 11.5 |
 | **Opt-out Rate** | Taxa de descadastro por canal | Seção 3.1 |
 
-## 🔧 Como Executar
-
-1. **Abra o BigQuery Console**
-2. **Cole as queries do arquivo** `user_tracking_analysis.sql`
-3. **Execute seção por seção** para análises específicas
-4. **Materialize a view USER_JOURNEY** para análises recorrentes
 
 ## ⚠️ Considerações Importantes
 
 - **Timestamps RMI**: Formato STRING, requer parsing
 - **CPF**: Campo chave universal para ligação
 - **Performance**: Use LIMIT para testes iniciais
-- **Materialização**: Views grandes devem ser materializadas
 
 ## 📈 Interpretando Resultados
 
