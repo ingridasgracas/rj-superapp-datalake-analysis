@@ -1,6 +1,35 @@
 -- ========================================
 -- ANÁLISE EXPLORATÓRIA DE TRACKING DE USUÁRIOS
--- Datasets: rj-superapp.brutos_rmi e rj-superapp.brutos_go
+-- Datasets: -- 2.2.2 BREADCRuser_action_paths AS (
+  SELECT 
+    cpf,
+    action,
+    resource,
+    timestamp,
+    old_value,
+    new_value,
+    ROW_NUMBER() OVER (PARTITION BY cpf ORDER BY TIMESTAMP(timestamp)) as action_sequence
+  FROM `rj-superapp.brutos_rmi.rmi_audit_logs`
+  WHERE cpf IS NOT NULL 
+    AND timestamp IS NOT NULL 
+    AND old_value IS NOT NULL 
+    AND resource = 'phone'
+),completo de navegação
+WITH user_actions AS (
+  SELECT 
+    cpf,
+    action,
+    resource,
+    timestamp,
+    old_value,
+    new_value,
+    ROW_NUMBER() OVER (PARTITION BY cpf ORDER BY TIMESTAMP(timestamp)) as action_sequence
+  FROM `rj-superapp.brutos_rmi.rmi_audit_logs`
+  WHERE cpf IS NOT NULL 
+    AND timestamp IS NOT NULL 
+    AND old_value IS NOT NULL 
+    AND resource = 'phone'
+),os_rmi e rj-superapp.brutos_go
 -- ========================================
 
 -- ==========================================
@@ -11,6 +40,7 @@
 SELECT 'RMI Audit Logs' as dataset, COUNT(DISTINCT cpf) as usuarios_unicos
 FROM `rj-superapp.brutos_rmi.rmi_audit_logs`
 WHERE cpf IS NOT NULL
+  AND TIMESTAMP(timestamp) >= '2025-09-05'
 
 UNION ALL
 
@@ -37,7 +67,18 @@ FROM `rj-superapp.brutos_go.inscricoes`
 WHERE cpf IS NOT NULL;
 
 -- ==========================================
--- 2. ANÁLISE DE EVENTOS DE AUDITORIA (RMI)
+-- 2. ANÁLISE DE EVENTOS DE AUDITORIA (RMI) COM BREADCRUMBS
+-- ==========================================
+-- 
+-- CONCEITO DE BREADCRUMBS NO BIGQUERY:
+-- Como o BigQuery não suporta CTEs recursivas como Oracle/PostgreSQL,
+-- usamos window functions com ARRAY_AGG para criar caminhos de navegação.
+-- 
+-- Diferentes abordagens implementadas:
+-- 1. Breadcrumb simples: ação + sequência
+-- 2. Breadcrumb completo: caminho completo de ações
+-- 3. Breadcrumb contextual: jornada com detalhes das mudanças
+-- 4. Análise de padrões: identificação de tipos de jornada
 -- ==========================================
 
 -- 2.1 Tipos de ações mais frequentes
@@ -48,13 +89,13 @@ SELECT
     COUNT(DISTINCT cpf) as unique_users
 FROM `rj-superapp.brutos_rmi.rmi_audit_logs`
 WHERE action IS NOT NULL
+  AND TIMESTAMP(timestamp) >= '2025-09-05'
 GROUP BY action, resource
 ORDER BY frequency DESC
 LIMIT 20;
 
--- 2.2 Timeline de ações por usuário (últimos 30 dias)
-SELECT 
-    cpf,
+-- 2.2 Timeline de ações por usuário com breadcrumbs
+SELECT cpf,
     action,
     resource,
     timestamp,
@@ -62,9 +103,177 @@ SELECT
     new_value
 FROM `rj-superapp.brutos_rmi.rmi_audit_logs`
 WHERE cpf IS NOT NULL 
-    AND timestamp IS NOT NULL
-    AND PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', timestamp) >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
-ORDER BY cpf, PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', timestamp) DESC;
+  AND timestamp IS NOT NULL 
+  AND old_value IS NOT NULL 
+  AND resource = 'phone'
+  AND TIMESTAMP(timestamp) >= '2025-09-05'
+ORDER BY cpf DESC;
+
+-- 2.2.1 BREADCRUMBS - Caminho de ações por usuário (Versão Simples)
+WITH user_actions AS (
+  SELECT 
+    cpf,
+    action,
+    resource,
+    timestamp,
+    old_value,
+    new_value,
+    ROW_NUMBER() OVER (PARTITION BY cpf ORDER BY TIMESTAMP(timestamp)) as action_sequence
+  FROM `rj-superapp.brutos_rmi.rmi_audit_logs`
+  WHERE cpf IS NOT NULL 
+    AND timestamp IS NOT NULL 
+    AND old_value IS NOT NULL 
+    AND resource = 'phone'
+)
+SELECT 
+  cpf,
+  action,
+  resource,
+  timestamp,
+  old_value,
+  new_value,
+  action_sequence,
+  -- Breadcrumb simples: ação atual + sequência
+  CONCAT(action, ' (', action_sequence, ')') as action_breadcrumb
+FROM user_actions
+ORDER BY cpf, action_sequence;
+
+-- 2.2.2 BREADCRUMBS - Caminho completo de ações por usuário
+WITH user_actions_ordered AS (
+  SELECT 
+    cpf,
+    action,
+    resource,
+    timestamp,
+    old_value,
+    new_value,
+    ROW_NUMBER() OVER (PARTITION BY cpf ORDER BY TIMESTAMP(timestamp)) as action_sequence
+  FROM `rj-superapp.brutos_rmi.rmi_audit_logs`
+  WHERE cpf IS NOT NULL 
+    AND timestamp IS NOT NULL 
+    AND old_value IS NOT NULL 
+    AND resource = 'phone'
+    AND TIMESTAMP(timestamp) >= '2025-09-05'
+),
+user_action_paths AS (
+  SELECT 
+    cpf,
+    action,
+    resource,
+    timestamp,
+    old_value,
+    new_value,
+    action_sequence,
+    -- Criar array de todas as ações anteriores + atual
+    ARRAY_AGG(action) OVER (
+      PARTITION BY cpf 
+      ORDER BY action_sequence 
+      ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ) as action_path_array
+  FROM user_actions_ordered
+)
+SELECT 
+  cpf,
+  action,
+  resource,
+  timestamp,
+  old_value,
+  new_value,
+  action_sequence,
+  -- Breadcrumb completo: todas as ações até o momento
+  ARRAY_TO_STRING(action_path_array, ' → ') as action_breadcrumb,
+  -- Contagem de ações no caminho
+  ARRAY_LENGTH(action_path_array) as path_length
+FROM user_action_paths
+ORDER BY cpf, action_sequence;
+
+-- 2.2.3 BREADCRUMBS - Jornada com contexto de mudanças
+WITH user_phone_journey AS (
+  SELECT 
+    cpf,
+    action,
+    resource,
+    timestamp,
+    old_value,
+    new_value,
+    ROW_NUMBER() OVER (PARTITION BY cpf ORDER BY TIMESTAMP(timestamp)) as step_number,
+    LAG(new_value) OVER (PARTITION BY cpf ORDER BY TIMESTAMP(timestamp)) as previous_value
+  FROM `rj-superapp.brutos_rmi.rmi_audit_logs`
+  WHERE cpf IS NOT NULL 
+    AND timestamp IS NOT NULL 
+    AND old_value IS NOT NULL 
+    AND resource = 'phone'
+    AND TIMESTAMP(timestamp) >= '2025-09-05'
+),
+journey_with_context AS (
+  SELECT 
+    *,
+    -- Criar contexto da mudança
+    CASE 
+      WHEN step_number = 1 THEN CONCAT('INÍCIO: ', action, ' (', old_value, ' → ', new_value, ')')
+      ELSE CONCAT('PASSO ', step_number, ': ', action, ' (', old_value, ' → ', new_value, ')')
+    END as step_description,
+    -- Array de todas as mudanças até agora
+    ARRAY_AGG(CONCAT(action, ':', old_value, '→', new_value)) OVER (
+      PARTITION BY cpf 
+      ORDER BY step_number 
+      ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ) as journey_breadcrumb
+  FROM user_phone_journey
+)
+SELECT 
+  cpf,
+  action,
+  resource,
+  timestamp,
+  old_value,
+  new_value,
+  step_number,
+  step_description,
+  -- Breadcrumb da jornada completa
+  ARRAY_TO_STRING(journey_breadcrumb, ' ➤ ') as full_journey_breadcrumb,
+  -- Resumo da jornada
+  CONCAT(
+    'Jornada de ', ARRAY_LENGTH(journey_breadcrumb), ' passos: ',
+    ARRAY_TO_STRING(journey_breadcrumb, ' ➤ ')
+  ) as journey_summary
+FROM journey_with_context
+ORDER BY cpf, step_number;
+
+-- 2.2.4 BREADCRUMBS - Análise de padrões de jornada
+WITH user_journey_patterns AS (
+  SELECT 
+    cpf,
+    ARRAY_AGG(action ORDER BY TIMESTAMP(timestamp)) as action_sequence,
+    COUNT(*) as total_actions,
+    MIN(timestamp) as first_action_time,
+    MAX(timestamp) as last_action_time
+  FROM `rj-superapp.brutos_rmi.rmi_audit_logs`
+  WHERE cpf IS NOT NULL 
+    AND timestamp IS NOT NULL 
+    AND old_value IS NOT NULL 
+    AND resource = 'phone'
+    AND TIMESTAMP(timestamp) >= '2025-09-05'
+  GROUP BY cpf
+)
+SELECT 
+  cpf,
+  total_actions,
+  first_action_time,
+  last_action_time,
+  -- Breadcrumb da sequência completa de ações
+  ARRAY_TO_STRING(action_sequence, ' → ') as complete_user_journey,
+  -- Primeira e última ação
+  action_sequence[OFFSET(0)] as first_action,
+  action_sequence[OFFSET(ARRAY_LENGTH(action_sequence) - 1)] as last_action,
+  -- Padrão da jornada
+  CASE 
+    WHEN total_actions = 1 THEN 'Ação Única'
+    WHEN action_sequence[OFFSET(0)] = action_sequence[OFFSET(ARRAY_LENGTH(action_sequence) - 1)] THEN 'Jornada Circular'
+    ELSE 'Jornada Linear'
+  END as journey_pattern
+FROM user_journey_patterns
+ORDER BY total_actions DESC, cpf;
 
 -- ==========================================
 -- 3. ANÁLISE DE OPT-IN/OPT-OUT
@@ -91,7 +300,8 @@ SELECT
 FROM `rj-superapp.brutos_rmi.rmi_opt_in_history`
 WHERE action LIKE '%opt%'
     AND cpf IS NOT NULL
-ORDER BY cpf, PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', timestamp) DESC;
+    AND TIMESTAMP(timestamp) >= '2025-09-05'
+ORDER BY cpf, TIMESTAMP(timestamp) DESC;
 
 -- ==========================================
 -- 4. ANÁLISE DE ENGAJAMENTO EM CURSOS (GO)
@@ -175,8 +385,8 @@ WHERE r.cpf IN (SELECT cpf FROM go_users);
 
 -- 6.1 Atividade por dia da semana (RMI Audit Logs)
 SELECT 
-    EXTRACT(DAYOFWEEK FROM PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', timestamp)) as dia_semana,
-    CASE EXTRACT(DAYOFWEEK FROM PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', timestamp))
+    EXTRACT(DAYOFWEEK FROM TIMESTAMP(timestamp)) as dia_semana,
+    CASE EXTRACT(DAYOFWEEK FROM TIMESTAMP(timestamp))
         WHEN 1 THEN 'Domingo'
         WHEN 2 THEN 'Segunda'
         WHEN 3 THEN 'Terça'
@@ -189,16 +399,18 @@ SELECT
     COUNT(DISTINCT cpf) as usuarios_unicos
 FROM `rj-superapp.brutos_rmi.rmi_audit_logs`
 WHERE timestamp IS NOT NULL
+  AND TIMESTAMP(timestamp) >= '2025-09-05'
 GROUP BY dia_semana, nome_dia
 ORDER BY dia_semana;
 
 -- 6.2 Horários de maior atividade
 SELECT 
-    EXTRACT(HOUR FROM PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', timestamp)) as hora,
+    EXTRACT(HOUR FROM TIMESTAMP(timestamp)) as hora,
     COUNT(*) as total_eventos,
     COUNT(DISTINCT cpf) as usuarios_unicos
 FROM `rj-superapp.brutos_rmi.rmi_audit_logs`
 WHERE timestamp IS NOT NULL
+  AND TIMESTAMP(timestamp) >= '2025-09-05'
 GROUP BY hora
 ORDER BY hora;
 
@@ -271,6 +483,7 @@ SELECT
 FROM `rj-superapp.brutos_rmi.rmi_audit_logs` a
 CROSS JOIN user_cpf u
 WHERE a.cpf = u.target_cpf
+  AND TIMESTAMP(a.timestamp) >= '2025-09-05'
 
 UNION ALL
 
@@ -301,170 +514,3 @@ WHERE i.cpf = u.target_cpf
 
 ORDER BY evento_timestamp DESC;
 */
-
--- ==========================================
--- 11. MATERIALIZAÇÃO DA ENTIDADE USER-JOURNEY
--- ==========================================
-
--- 11.1 Criação da view USER_JOURNEY consolidando dados cross-platform
-CREATE OR REPLACE VIEW `rj-superapp.analytics.user_journey` AS
-WITH rmi_activity AS (
-  SELECT 
-    cpf,
-    'RMI' as platform,
-    COUNT(*) as total_actions,
-    MIN(PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', timestamp)) as first_interaction,
-    MAX(PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', timestamp)) as last_interaction
-  FROM `rj-superapp.brutos_rmi.rmi_audit_logs`
-  WHERE cpf IS NOT NULL AND timestamp IS NOT NULL
-  GROUP BY cpf
-),
-go_activity AS (
-  SELECT 
-    i.cpf,
-    'GO' as platform,
-    COUNT(DISTINCT i.curso_id) as total_courses,
-    COUNT(*) as total_enrollments,
-    MIN(i.enrolled_at) as first_enrollment,
-    MAX(i.updated_at) as last_activity,
-    COUNT(i.concluded_at) as completed_courses
-  FROM `rj-superapp.brutos_go.inscricoes` i
-  WHERE i.cpf IS NOT NULL
-  GROUP BY i.cpf
-),
-user_base AS (
-  SELECT DISTINCT cpf
-  FROM (
-    SELECT cpf FROM `rj-superapp.brutos_rmi.rmi_avatars` WHERE cpf IS NOT NULL
-    UNION DISTINCT
-    SELECT cpf FROM `rj-superapp.brutos_go.inscricoes` WHERE cpf IS NOT NULL
-  )
-)
-SELECT 
-  u.cpf,
-  CASE 
-    WHEN r.cpf IS NOT NULL AND g.cpf IS NOT NULL THEN 'BOTH'
-    WHEN r.cpf IS NOT NULL THEN 'RMI'
-    WHEN g.cpf IS NOT NULL THEN 'GO'
-    ELSE 'UNKNOWN'
-  END as platform,
-  COALESCE(
-    LEAST(r.first_interaction, g.first_enrollment),
-    r.first_interaction,
-    g.first_enrollment
-  ) as first_interaction,
-  COALESCE(
-    GREATEST(r.last_interaction, g.last_activity),
-    r.last_interaction,
-    g.last_activity
-  ) as last_interaction,
-  COALESCE(r.total_actions, 0) as total_actions,
-  COALESCE(g.total_courses, 0) as total_courses,
-  COALESCE(g.total_enrollments, 0) as total_enrollments,
-  COALESCE(g.completed_courses, 0) as completed_courses,
-  CASE 
-    WHEN COALESCE(r.total_actions, 0) + COALESCE(g.total_enrollments, 0) >= 10 THEN 'Alto'
-    WHEN COALESCE(r.total_actions, 0) + COALESCE(g.total_enrollments, 0) >= 3 THEN 'Médio'
-    ELSE 'Baixo'
-  END as engagement_level,
-  CASE 
-    WHEN g.total_courses > 0 AND g.completed_courses > 0 
-    THEN ROUND(g.completed_courses * 100.0 / g.total_courses, 2)
-    ELSE 0
-  END as completion_rate
-FROM user_base u
-LEFT JOIN rmi_activity r ON u.cpf = r.cpf
-LEFT JOIN go_activity g ON u.cpf = g.cpf;
-
--- 11.2 Análise de segmentos de usuários baseada na jornada
-SELECT 
-  platform,
-  engagement_level,
-  COUNT(*) as usuarios,
-  AVG(total_actions) as media_acoes,
-  AVG(total_courses) as media_cursos,
-  AVG(completion_rate) as taxa_conclusao_media,
-  MIN(first_interaction) as primeira_interacao,
-  MAX(last_interaction) as ultima_interacao
-FROM `rj-superapp.analytics.user_journey`
-GROUP BY platform, engagement_level
-ORDER BY platform, engagement_level;
-
--- 11.3 Identificação de usuários churned (sem atividade recente)
-SELECT 
-  cpf,
-  platform,
-  engagement_level,
-  last_interaction,
-  TIMESTAMP_DIFF(CURRENT_TIMESTAMP(), last_interaction, DAY) as dias_sem_atividade,
-  total_actions,
-  total_courses,
-  completion_rate
-FROM `rj-superapp.analytics.user_journey`
-WHERE last_interaction < TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
-  AND engagement_level IN ('Alto', 'Médio')
-ORDER BY dias_sem_atividade DESC, engagement_level;
-
--- 11.4 Análise de conversão RMI → GO
-SELECT 
-  'Apenas RMI' as segmento,
-  COUNT(*) as usuarios,
-  AVG(total_actions) as media_acoes_rmi
-FROM `rj-superapp.analytics.user_journey`
-WHERE platform = 'RMI'
-
-UNION ALL
-
-SELECT 
-  'RMI + GO' as segmento,
-  COUNT(*) as usuarios,
-  AVG(total_actions) as media_acoes_rmi
-FROM `rj-superapp.analytics.user_journey`
-WHERE platform = 'BOTH'
-
-UNION ALL
-
-SELECT 
-  'Apenas GO' as segmento,
-  COUNT(*) as usuarios,
-  0 as media_acoes_rmi
-FROM `rj-superapp.analytics.user_journey`
-WHERE platform = 'GO';
-
--- 11.5 Coorte de retenção por mês de primeira interação
-WITH monthly_cohorts AS (
-  SELECT 
-    cpf,
-    DATE_TRUNC(first_interaction, MONTH) as cohort_month,
-    last_interaction,
-    platform
-  FROM `rj-superapp.analytics.user_journey`
-  WHERE first_interaction IS NOT NULL
-),
-cohort_retention AS (
-  SELECT 
-    cohort_month,
-    platform,
-    COUNT(DISTINCT cpf) as cohort_size,
-    COUNT(DISTINCT CASE 
-      WHEN TIMESTAMP_DIFF(CURRENT_TIMESTAMP(), last_interaction, DAY) <= 30 
-      THEN cpf 
-    END) as active_30d,
-    COUNT(DISTINCT CASE 
-      WHEN TIMESTAMP_DIFF(CURRENT_TIMESTAMP(), last_interaction, DAY) <= 90 
-      THEN cpf 
-    END) as active_90d
-  FROM monthly_cohorts
-  GROUP BY cohort_month, platform
-)
-SELECT 
-  cohort_month,
-  platform,
-  cohort_size,
-  active_30d,
-  active_90d,
-  ROUND(active_30d * 100.0 / cohort_size, 2) as retention_30d_pct,
-  ROUND(active_90d * 100.0 / cohort_size, 2) as retention_90d_pct
-FROM cohort_retention
-WHERE cohort_size >= 10  -- Apenas coortes com pelo menos 10 usuários
-ORDER BY cohort_month DESC, platform;
