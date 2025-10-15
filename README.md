@@ -136,40 +136,6 @@ Os diagramas estão em formato Mermaid. Para visualizá-los:
 - **Auditoria** - Tracking completo implementado
 - **Acesso Controlado** - Dados sensíveis de saúde e assistência social
 
-## 📋 Roadmap
-
-### ✅ Fase 1 - Inventário (Concluída)
-- [x] Mapeamento completo das tabelas
-- [x] Identificação de relacionamentos
-- [x] Documentação de campos
-
-### 🚧 Fase 2 - Análise (Em Progresso)
-- [x] Queries de tracking implementadas
-- [x] Casos de uso documentados
-- [ ] Validação de qualidade de dados
-
-### 📅 Fase 3 - Otimização (Planejada)
-- [ ] Views materializadas
-- [ ] Dashboards automatizados
-- [ ] Alertas de qualidade
-
-## 🤝 Contribuição
-
-Este projeto faz parte da análise do data lake RJ SuperApp. Para contribuições:
-
-1. Revise a documentação em `docs/`
-2. Execute as queries em `sql/`
-3. Valide os diagramas em `diagrams/`
-4. Sugira melhorias via issues
-
-## 📄 Licença
-
-Este projeto é parte da análise técnica do RJ SuperApp e contém dados sensíveis. 
-Uso restrito para fins de análise e documentação interna.
-
-## 📞 Contato
-
-**Projeto:** Análise Data Lake RJ SuperApp  
 **Data:** Setembro 2025  
 **Versão:** 1.0  
 
